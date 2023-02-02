@@ -5,7 +5,7 @@
 TextTitan library offers a comprehensive set of tools for tackling a wide range of NLP tasks including classification, regression, multi-modal and generation tasks.
 
 
-** Still under development
+** still under development
 
 ## Introduction
 TextTitan is a comprehensive NLP library that provides end-to-end solutions for a wide range of NLP tasks. This library makes it easy for developers and researchers to perform complex NLP tasks with ease and efficiency.
