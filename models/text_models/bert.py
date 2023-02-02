@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from transformers import BertPreTrainedModel, BertModel
 from transformers.modeling_outputs import SequenceClassifierOutput
-
+import json
 
 class BertForSequenceClassification(BertPreTrainedModel):
     def __init__(self, config):
@@ -23,17 +23,17 @@ class BertForSequenceClassification(BertPreTrainedModel):
         self.post_init()
 
     def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        token_type_ids=None,
-        position_ids= None,
-        head_mask= None,
-        inputs_embeds = None,
-        labels= None,
-        output_attentions= None,
-        output_hidden_states= None,
-        return_dict= None,
+            self,
+            input_ids=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=None,
+            labels=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
     ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -62,20 +62,19 @@ class BertForSequenceClassification(BertPreTrainedModel):
 
         loss = None
         if labels is not None:
-            if self.config.problem_type is None:
-                if self.num_labels == 1:
-                    self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
-                    self.config.problem_type = "single_label_classification"
-                else:
-                    self.config.problem_type = "multi_label_classification"
+            if 'regression' in self.config.problem_type:
+                if self.config.problem_type == "regression_mse":
+                    loss_fct = nn.MSELoss()
+                elif self.config.problem_type == "regression_hubber":
+                    loss_fct = nn.HuberLoss()
+                elif self.config.problem_type == "regression_smooth":
+                    loss_fct = nn.SmoothL1Loss()
 
-            if self.config.problem_type == "regression":
-                loss_fct = nn.HuberLoss()
                 if self.num_labels == 1:
                     loss = loss_fct(logits.squeeze(), labels.float().squeeze())
                 else:
                     loss = loss_fct(logits, labels)
+
             elif self.config.problem_type == "single_label_classification":
                 loss_fct = nn.CrossEntropyLoss()
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
@@ -92,3 +91,14 @@ class BertForSequenceClassification(BertPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+    def save_pretrained(self, path):
+        super().save_pretrained(path)
+        conf = open(path + '/config.json')
+        conf = json.load(conf)
+        conf['label_vocab'] = list(self.label_map)
+        with open(path + '/config.json', "w") as outfile:
+            json.dump(conf, outfile)
+        return True
+
+

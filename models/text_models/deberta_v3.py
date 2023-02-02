@@ -1,35 +1,27 @@
 from typing import Optional
-
 import torch
 import torch.nn as nn
-from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers import DebertaV2Model
+from transformers.modeling_outputs import SequenceClassifierOutput
 
 
 class ClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
 
-    def __init__(self, config):
+    def __init__(self, config, fc_hidden_1=64, fc_hidden_2=32, classifier_dropout=0.1):
         super().__init__()
-        classifier_dropout = 0.1
-        self.dense = [nn.Linear(config.hidden_size, 128), nn.Tanh(), nn.Dropout(classifier_dropout), nn.Linear(128, 32),
-                      nn.Tanh(), nn.Dropout(classifier_dropout),
-                      nn.Linear(32, config.num_labels)]
+        self.classifier_dropout = classifier_dropout
+        self.dense = [nn.Linear(config.hidden_size, fc_hidden_1), nn.Tanh(), nn.Dropout(classifier_dropout),
+                      nn.Linear(fc_hidden_1, fc_hidden_2), nn.Tanh(), nn.Dropout(classifier_dropout),
+                      nn.Linear(fc_hidden_2, config.num_labels)]
         self.dense = nn.Sequential(*self.dense)
-        classifier_dropout = (
-            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
-        )
         self.dropout = nn.Dropout(classifier_dropout)
-        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
 
     def forward(self, features, **kwargs):
-        x = features[:, 0, :]  # take <s> token (equiv. to [CLS])
-        x = self.dropout(x)
+        x = self.dropout(features)
         x = self.dense(x)
-        #         x = torch.tanh(x)
-        #         x = self.dropout(x)
-        #         x = self.out_proj(x)
         return x
+
 
 
 
@@ -45,23 +37,27 @@ class MeanPooling(nn.Module):
         mean_embeddings = sum_embeddings / sum_mask
         return mean_embeddings
 
-# deberta_V3 model
-class DebertaV3(nn.Module):
-    def __init__(self, output_dim,base="microsoft/deberta-v3-base",fc_layer=768):
-        super().__init__()
-        self.deberta = DebertaV2Model.from_pretrained(base)
-        # self.classifier = RobertaClassificationHead(config)
-        self.average_pooling = MeanPooling()
-        self.output_dim = output_dim
-        self.num_neurons = fc_layer
-        self.fc_hidden = 64
-        self.hidden_size = 32
-        self.fc = nn.Sequential(*[nn.Linear(self.num_neurons, self.fc_hidden), nn.ReLU(inplace=True),
-                                  nn.Linear(self.fc_hidden, self.hidden_size), nn.ReLU(inplace=True),
-                                  nn.Linear(self.hidden_size, self.hidden_size), nn.ReLU(inplace=True),
-                                  nn.Linear(self.hidden_size, self.output_dim)])
 
-        dropout = 0.1
+class DebertaV3(nn.Module):
+    def __init__(self, base_image="microsoft/deberta-v3-base", problem_type='single_label_classification',
+                 fc_layer_1=64, fc_layer_2=32, output_dim=1, dp=0.1):
+        super().__init__()
+        self.deberta = DebertaV2Model.from_pretrained(base_image)  # RobertaModel(config, add_pooling_layer=False)
+        # self.classifier = RobertaClassificationHead(config)
+        self.problem_type = problem_type
+        self.average_pooling = MeanPooling()
+        self.config = self.deberta.config
+        self.num_labels = output_dim
+        self.config.num_labels = output_dim
+        self.config.problem_type = problem_type
+        self.classifier_head = ClassificationHead(self.config, fc_layer_1, fc_layer_2, dp)
+        # self.base_num_neurons = self.config.hidden_state
+        self.fc_hidden_1 = fc_layer_1
+        self.fc_hidden_2 = fc_layer_2
+        self.output_dim = output_dim
+        self.dropout = dp
+        self.base_image = base_image
+        self.label_map = None
 
     def forward(
             self,
@@ -87,14 +83,28 @@ class DebertaV3(nn.Module):
 
         pooling = self.average_pooling(outputs.last_hidden_state, attention_mask)
 
-        logits = self.fc(pooling)
-        # logits = self.classifier(sequence_output)
+        logits = self.classifier_head(pooling)
         loss = None
         if labels is not None:
-            loss_fct = nn.SmoothL1Loss()
-            logits = torch.squeeze(logits, -1)
+            if 'regression' in self.config.problem_type:
+                if self.config.problem_type == "regression_mse":
+                    loss_fct = nn.MSELoss()
+                elif self.config.problem_type == "regression_hubber":
+                    loss_fct = nn.HuberLoss()
+                elif self.config.problem_type == "regression_smooth":
+                    loss_fct = nn.SmoothL1Loss()
 
-            loss = loss_fct(logits, labels)
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.float().squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = nn.CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = nn.BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
 
         return SequenceClassifierOutput(
             loss=loss,
@@ -102,3 +112,37 @@ class DebertaV3(nn.Module):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+    def save_pretrained(self, path):
+        if '.pth' not in path:
+            path += '.pth'
+
+        conf = self.state_dict()
+        conf['problem_type'] = self.problem_type
+        conf['fc_hidden1'] = self.fc_hidden_1
+        conf['fc_hidden2'] = self.fc_hidden_2
+        conf['output_dim'] = self.output_dim
+        conf['base_image'] = self.base_image
+        conf['label_map'] = self.label_map
+        conf['dropout'] = self.dropout
+        conf['model_name'] = 'deberta'
+        torch.save(conf, path)
+        print("Model Saved as ", path)
+
+    @staticmethod
+    def load(path):
+        conf = torch.load(path)
+
+        model = DebertaV3(problem_type=conf['problem_type'], fc_layer_1=conf['fc_hidden1'],
+                          fc_layer_2=conf['fc_hidden2'], output_dim=conf['output_dim'], dp=conf['dropout'])
+        model.label_map = conf['label_map']
+
+        keys_to_drop = ['problem_type', 'fc_hidden1', 'fc_hidden2', 'output_dim', 'dropout', 'label_map', 'base_image',
+                        'model_name']
+        for key in keys_to_drop:
+            conf.pop(key)
+
+        model.load_state_dict(conf)
+
+        return model
+

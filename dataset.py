@@ -1,5 +1,5 @@
 from torch.utils.data import Dataset
-
+import numpy as np
 
 class CustomDataset(Dataset):
     def __init__(self, text, labels):
@@ -15,3 +15,4 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.text[idx], self.label[idx]
+
